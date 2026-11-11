@@ -1,0 +1,6 @@
+{
+  "name": "M-b AI Film Studio",
+  "description": "Professional AI filmmaking studio with automatic screenplay breakdown, multi-provider clip generation, intelligent continuity assistant, and multi-track timeline assembly.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
