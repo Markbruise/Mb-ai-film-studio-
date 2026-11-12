@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useState, useImperativeHandle, forwardRef } from 'react';
-import { Play, Pause, SkipBack, SkipForward, Volume2, VolumeX, Maximize2, Grid, Sparkles, Layers } from 'lucide-react';
-import { FilmProject, VideoClip, Shot } from '../types/film';
+import { Play, Pause, SkipBack, SkipForward, Volume2, VolumeX, Maximize2, Grid, Sparkles, Layers, Blend, ArrowLeft, ArrowRight, Zap, Moon } from 'lucide-react';
+import { FilmProject, VideoClip, Shot, TRANSITION_PRESETS, TransitionType } from '../types/film';
 import { formatSMPTETimecode } from '../utils/timecode';
 
 export interface CinemaPlayerRef {
@@ -27,6 +27,7 @@ export const CinemaPlayer = forwardRef<CinemaPlayerRef, CinemaPlayerProps>(({
 }, ref) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const prevVideoRef = useRef<HTMLVideoElement | null>(null);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const [showOverlays, setShowOverlays] = useState<boolean>(true);
@@ -55,9 +56,12 @@ export const CinemaPlayer = forwardRef<CinemaPlayerRef, CinemaPlayerProps>(({
   }));
 
   // Find active clip at current time
-  const currentClip: VideoClip | undefined = project.clips.find(
+  const currentClipIndex = project.clips.findIndex(
     (c) => localTimeRef.current >= c.timelineStart && localTimeRef.current < c.timelineStart + c.duration
-  ) || project.clips[project.clips.length - 1];
+  );
+  const resolvedClipIndex = currentClipIndex >= 0 ? currentClipIndex : Math.max(0, project.clips.length - 1);
+  const currentClip: VideoClip | undefined = project.clips[resolvedClipIndex];
+  const prevClipForElement: VideoClip | undefined = resolvedClipIndex > 0 ? project.clips[resolvedClipIndex - 1] : undefined;
 
   const currentShot: Shot | undefined = project.shots.find((s) => s.shotId === currentClip?.shotId);
   const currentScene = project.scenes.find((sc) => sc.sceneId === currentClip?.sceneId);
@@ -66,6 +70,12 @@ export const CinemaPlayer = forwardRef<CinemaPlayerRef, CinemaPlayerProps>(({
     currentClip?.videoUrl &&
     !currentClip.videoUrl.startsWith('procedural://') &&
     currentClip.generationStatus === 'completed'
+  );
+
+  const isPrevRealVideo = Boolean(
+    prevClipForElement?.videoUrl &&
+    !prevClipForElement.videoUrl.startsWith('procedural://') &&
+    prevClipForElement.generationStatus === 'completed'
   );
 
   const musicAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -80,7 +90,8 @@ export const CinemaPlayer = forwardRef<CinemaPlayerRef, CinemaPlayerProps>(({
     video.muted = isMuted;
 
     const clipElapsed = Math.max(0, localTimeRef.current - currentClip.timelineStart);
-    if (Math.abs(video.currentTime - clipElapsed) > 0.35) {
+    const syncThreshold = isPlaying ? 0.35 : 0.03;
+    if (Math.abs(video.currentTime - clipElapsed) > syncThreshold && video.readyState >= 1) {
       video.currentTime = clipElapsed;
     }
 
@@ -89,36 +100,81 @@ export const CinemaPlayer = forwardRef<CinemaPlayerRef, CinemaPlayerProps>(({
     } else {
       video.pause();
     }
-  }, [isPlaying, isRealVideo, currentClip?.clipId, playbackSpeed, isMuted]);
+  }, [isPlaying, isRealVideo, currentClip?.clipId, playbackSpeed, isMuted, currentTime]);
+
+  // Synchronize outgoing HTML Video Element during active transitions
+  useEffect(() => {
+    const prevVid = prevVideoRef.current;
+    if (!prevVid || !isPrevRealVideo || !prevClipForElement || !currentClip) return;
+
+    prevVid.playbackRate = playbackSpeed;
+    prevVid.muted = true;
+
+    const transType = currentClip.transitionIn || 'cut';
+    const transDuration = currentClip.transitionDuration ?? (TRANSITION_PRESETS[transType]?.defaultDuration ?? 0.8);
+    const clipElapsed = Math.max(0, localTimeRef.current - currentClip.timelineStart);
+    const inTransition = transType !== 'cut' && transDuration > 0 && clipElapsed < transDuration;
+
+    if (inTransition) {
+      const prevElapsed = Math.max(0, prevClipForElement.duration - (transDuration - clipElapsed));
+      const syncThreshold = isPlaying ? 0.35 : 0.03;
+      if (Math.abs(prevVid.currentTime - prevElapsed) > syncThreshold && prevVid.readyState >= 1) {
+        prevVid.currentTime = prevElapsed;
+      }
+      if (isPlaying && prevVid.paused) {
+        prevVid.play().catch(() => {});
+      } else if (!isPlaying && !prevVid.paused) {
+        prevVid.pause();
+      }
+    } else if (!prevVid.paused) {
+      prevVid.pause();
+    }
+  }, [isPlaying, isPrevRealVideo, prevClipForElement?.clipId, currentClip?.clipId, playbackSpeed, currentTime]);
 
   // Active dialogue line
   const activeDialogue = project.dialogueTracks.find(
     (d) => localTimeRef.current >= d.startTime && localTimeRef.current <= d.startTime + d.duration
   );
 
-  const activeMusic = project.musicTracks.find(
-    (m) => localTimeRef.current >= m.startTime && localTimeRef.current < m.startTime + m.duration
-  ) || project.musicTracks[0];
+  const activeMusic =
+    [...project.musicTracks]
+      .reverse()
+      .find((m) => localTimeRef.current >= m.startTime && localTimeRef.current < m.startTime + m.duration) ||
+    project.musicTracks[project.musicTracks.length - 1];
 
   // Synchronize Acoustic Music Audio
   useEffect(() => {
     const musicAudio = musicAudioRef.current;
     if (!musicAudio) return;
 
+    const rawVol = activeMusic?.volume ?? 70;
+    const normalizedTrackVol = rawVol <= 1 && rawVol > 0 ? rawVol : rawVol / 100;
     const musicLevel = isMuted
       ? 0
-      : Math.max(0, Math.min(1, ((activeMusic?.volume ?? 70) / 100) * ((project.exportSettings?.audioMix?.musicLevel ?? 70) / 100)));
+      : Math.max(0, Math.min(1, normalizedTrackVol * ((project.exportSettings?.audioMix?.musicLevel ?? 70) / 100)));
     musicAudio.volume = musicLevel;
     musicAudio.playbackRate = playbackSpeed;
 
-    if (activeMusic?.audioUrl && isPlaying) {
-      if (musicAudio.paused) {
-        musicAudio.play().catch(() => {});
+    if (activeMusic?.audioUrl) {
+      const musicElapsed = Math.max(0, localTimeRef.current - (activeMusic.startTime || 0));
+      const targetMusicTime =
+        Number.isFinite(musicAudio.duration) && musicAudio.duration > 0
+          ? musicElapsed % musicAudio.duration
+          : musicElapsed;
+      if (Math.abs(musicAudio.currentTime - targetMusicTime) > 0.5 && musicAudio.readyState >= 1) {
+        musicAudio.currentTime = targetMusicTime;
+      }
+      if (isPlaying) {
+        if (musicAudio.paused) {
+          musicAudio.play().catch(() => {});
+        }
+      } else {
+        musicAudio.pause();
       }
     } else {
       musicAudio.pause();
     }
-  }, [isPlaying, isMuted, playbackSpeed, activeMusic?.audioUrl, project.exportSettings?.audioMix?.musicLevel]);
+  }, [isPlaying, isMuted, playbackSpeed, activeMusic?.id, activeMusic?.audioUrl, activeMusic?.volume, activeMusic?.startTime, currentTime, project.exportSettings?.audioMix?.musicLevel]);
 
   // Synchronize Spoken Character Dialogue Audio
   useEffect(() => {
@@ -199,23 +255,38 @@ export const CinemaPlayer = forwardRef<CinemaPlayerRef, CinemaPlayerProps>(({
       ctx.rect(offsetX, offsetY, videoWidth, videoHeight);
       ctx.clip();
 
-      // Procedural Cinema Scene Rendering
-      const clipElapsed = currentClip ? localTimeRef.current - currentClip.timelineStart : 0;
-      const clipProgress = currentClip ? Math.min(1, Math.max(0, clipElapsed / currentClip.duration)) : 0;
+      // Helper to render visual scene content (real video frame or procedural artwork)
+      const drawClipVisual = (
+        clip: VideoClip | null | undefined,
+        shot: Shot | null | undefined,
+        scene: any,
+        elapsed: number,
+        videoEl: HTMLVideoElement | null
+      ) => {
+        if (!clip) return;
+        const clipProg = Math.min(1, Math.max(0, elapsed / (clip.duration || 4)));
+        const hasRealVideo = Boolean(
+          clip.videoUrl &&
+          !clip.videoUrl.startsWith('procedural://') &&
+          clip.generationStatus === 'completed' &&
+          videoEl &&
+          videoEl.readyState >= 2
+        );
 
-      // Draw real video frame if available; otherwise draw procedural cinematic scene
-      if (isRealVideo && videoRef.current && videoRef.current.readyState >= 2) {
-        try {
-          ctx.drawImage(videoRef.current, offsetX, offsetY, videoWidth, videoHeight);
-        } catch {
-          // Graceful fallback to procedural scene
+        if (hasRealVideo && videoEl) {
+          try {
+            ctx.drawImage(videoEl, offsetX, offsetY, videoWidth, videoHeight);
+            return;
+          } catch {
+            // Fallback to procedural artwork
+          }
         }
-      } else {
+
         // Color palette background based on scene/mood
         const gradient = ctx.createLinearGradient(offsetX, offsetY, offsetX + videoWidth, offsetY + videoHeight);
-        const isNight = currentScene?.timeOfDay === 'NIGHT';
-        const isGolden = currentScene?.timeOfDay === 'GOLDEN HOUR';
-        const isDawn = currentScene?.timeOfDay === 'DAWN';
+        const isNight = scene?.timeOfDay === 'NIGHT';
+        const isGolden = scene?.timeOfDay === 'GOLDEN HOUR';
+        const isDawn = scene?.timeOfDay === 'DAWN';
 
         if (isNight) {
           gradient.addColorStop(0, '#040b17');
@@ -240,22 +311,22 @@ export const CinemaPlayer = forwardRef<CinemaPlayerRef, CinemaPlayerProps>(({
 
         // Camera motion simulation (Push In, Pan Left, Tilt, etc.)
         ctx.save();
-        const camMotion = currentShot?.cameraMovement || 'Static';
+        const camMotion = shot?.cameraMovement || 'Static';
         let zoom = 1.0;
         let panX = 0;
         let panY = 0;
 
         if (camMotion === 'Push In / Dolly') {
-          zoom = 1.0 + clipProgress * 0.15;
+          zoom = 1.0 + clipProg * 0.15;
         } else if (camMotion === 'Pull Back') {
-          zoom = 1.15 - clipProgress * 0.15;
+          zoom = 1.15 - clipProg * 0.15;
         } else if (camMotion === 'Pan Left') {
-          panX = (clipProgress - 0.5) * 80;
+          panX = (clipProg - 0.5) * 80;
         } else if (camMotion === 'Pan Right') {
-          panX = (0.5 - clipProgress) * 80;
+          panX = (0.5 - clipProg) * 80;
         } else if (camMotion === 'Orbital Crane') {
-          zoom = 1.05 + Math.sin(clipProgress * Math.PI) * 0.08;
-          panX = Math.cos(clipProgress * Math.PI) * 50;
+          zoom = 1.05 + Math.sin(clipProg * Math.PI) * 0.08;
+          panX = Math.cos(clipProg * Math.PI) * 50;
         }
 
         ctx.translate(offsetX + videoWidth / 2 + panX, offsetY + videoHeight / 2 + panY);
@@ -303,48 +374,46 @@ export const CinemaPlayer = forwardRef<CinemaPlayerRef, CinemaPlayerProps>(({
         ctx.closePath();
         ctx.fill();
 
-        // Futuristic Sci-Fi Gantry / Foreground Character Silhouette
-        const isExtremeWide = currentShot?.shotType === 'Extreme Wide' || currentShot?.shotType === 'Wide Establishing';
-        const isCloseUp = currentShot?.shotType === 'Close-Up' || currentShot?.shotType === 'Extreme Close-Up';
+        // Foreground character silhouette
+        const isExtremeWide = shot?.shotType === 'Extreme Wide' || shot?.shotType === 'Wide Establishing';
+        const isCloseUp = shot?.shotType === 'Close-Up' || shot?.shotType === 'Extreme Close-Up';
 
         if (isCloseUp) {
-          // Dramatic character close-up silhouette with rim light
           const charX = offsetX + videoWidth * 0.5;
           const charY = offsetY + videoHeight * 0.85;
 
-          // Head and shoulders
           ctx.fillStyle = '#080b12';
           ctx.beginPath();
           ctx.ellipse(charX, charY - 90, 70, 95, 0, 0, Math.PI * 2);
           ctx.fill();
 
-          // Rim light on helmet/jawline
           ctx.strokeStyle = isGolden ? '#f59e0b' : '#38bdf8';
           ctx.lineWidth = 3;
           ctx.beginPath();
           ctx.arc(charX, charY - 90, 72, -Math.PI * 0.8, -Math.PI * 0.2);
           ctx.stroke();
 
-          // Visor glow
           const visorGrad = ctx.createLinearGradient(charX - 40, charY - 110, charX + 40, charY - 70);
           visorGrad.addColorStop(0, 'rgba(6, 182, 212, 0.7)');
           visorGrad.addColorStop(1, 'rgba(14, 165, 233, 0.1)');
           ctx.fillStyle = visorGrad;
           ctx.beginPath();
-          if ((ctx as any).roundRect) { (ctx as any).roundRect(charX - 35, charY - 110, 70, 32, 10); } else { ctx.rect(charX - 35, charY - 110, 70, 32); }
+          if ((ctx as any).roundRect) {
+            (ctx as any).roundRect(charX - 35, charY - 110, 70, 32, 10);
+          } else {
+            ctx.rect(charX - 35, charY - 110, 70, 32);
+          }
           ctx.fill();
         } else if (!isExtremeWide) {
-          // Medium shot character silhouette
-          const charX = offsetX + videoWidth * (currentClip?.visualContinuity.screenDirection === 'right-to-left' ? 0.65 : 0.4);
+          const charX = offsetX + videoWidth * (clip?.visualContinuity?.screenDirection === 'right-to-left' ? 0.65 : 0.4);
           const charY = offsetY + videoHeight * 0.82;
 
           ctx.fillStyle = '#040608';
           ctx.beginPath();
-          ctx.ellipse(charX, charY - 50, 22, 26, 0, 0, Math.PI * 2); // head
-          ctx.rect(charX - 28, charY - 24, 56, 75); // torso
+          ctx.ellipse(charX, charY - 50, 22, 26, 0, 0, Math.PI * 2);
+          ctx.rect(charX - 28, charY - 24, 56, 75);
           ctx.fill();
 
-          // Rim light contour
           ctx.strokeStyle = 'rgba(56, 189, 248, 0.7)';
           ctx.lineWidth = 2;
           ctx.beginPath();
@@ -355,20 +424,132 @@ export const CinemaPlayer = forwardRef<CinemaPlayerRef, CinemaPlayerProps>(({
         // Volumetric atmospheric particles / film grain
         particleSeed = (particleSeed + 1) % 1000;
         ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
-        for (let p = 0; p < 35; p++) {
+        for (let p = 0; p < 30; p++) {
           const px = offsetX + ((p * 97 + particleSeed * 0.8) % videoWidth);
           const py = offsetY + ((p * 53 + particleSeed * 0.4) % videoHeight);
           ctx.fillRect(px, py, 1.5, 1.5);
         }
 
         ctx.restore(); // restore camera transform
-      }
+      };
 
-      // Transition effects (Fade from Black / Dissolve)
-      if (currentClip?.transitionIn === 'fade_black' && clipElapsed < (currentClip.transitionDuration || 0.8)) {
-        const fadeRatio = 1 - clipElapsed / (currentClip.transitionDuration || 0.8);
-        ctx.fillStyle = `rgba(0, 0, 0, ${Math.max(0, Math.min(1, fadeRatio))})`;
-        ctx.fillRect(offsetX, offsetY, videoWidth, videoHeight);
+      // Elapsed time within current clip
+      const clipElapsed = currentClip ? Math.max(0, localTimeRef.current - currentClip.timelineStart) : 0;
+      const currentClipIndex = project.clips.findIndex((c) => c.clipId === currentClip?.clipId);
+      const prevClip = currentClipIndex > 0 ? project.clips[currentClipIndex - 1] : null;
+      const prevShot = prevClip ? project.shots.find((s) => s.shotId === prevClip.shotId) : null;
+      const prevScene = prevClip ? project.scenes.find((sc) => sc.sceneId === prevClip.sceneId) : null;
+
+      const transType = currentClip?.transitionIn || 'cut';
+      const transDuration = currentClip?.transitionDuration ?? (TRANSITION_PRESETS[transType]?.defaultDuration ?? 0.8);
+      const isTransitionActive = Boolean(
+        prevClip &&
+        transType !== 'cut' &&
+        transDuration > 0 &&
+        clipElapsed < transDuration
+      );
+
+      if (isTransitionActive && prevClip) {
+        const transProgress = Math.min(1, Math.max(0, clipElapsed / transDuration));
+        const prevElapsed = Math.max(0, prevClip.duration - (transDuration - clipElapsed));
+        const prevVideoEl = isPrevRealVideo ? prevVideoRef.current : null;
+
+        if (transType === 'cross_dissolve') {
+          // 1. Cross-Dissolve: Draw outgoing clip beneath, then blend incoming clip over it
+          drawClipVisual(prevClip, prevShot, prevScene, prevElapsed, prevVideoEl);
+          ctx.save();
+          ctx.globalAlpha = transProgress;
+          drawClipVisual(currentClip, currentShot, currentScene, clipElapsed, isRealVideo ? videoRef.current : null);
+          ctx.restore();
+        } else if (transType === 'wipe_left') {
+          // 2. Wipe Left: Outgoing clip beneath; incoming clip wipes in from right
+          drawClipVisual(prevClip, prevShot, prevScene, prevElapsed, prevVideoEl);
+          const wipeX = offsetX + videoWidth * (1 - transProgress);
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(wipeX, offsetY, offsetX + videoWidth - wipeX, videoHeight);
+          ctx.clip();
+          drawClipVisual(currentClip, currentShot, currentScene, clipElapsed, isRealVideo ? videoRef.current : null);
+          ctx.restore();
+          // Glowing optical wipe edge line
+          ctx.save();
+          ctx.strokeStyle = '#38bdf8';
+          ctx.lineWidth = 2.5;
+          ctx.shadowColor = '#0284c7';
+          ctx.shadowBlur = 8;
+          ctx.beginPath();
+          ctx.moveTo(wipeX, offsetY);
+          ctx.lineTo(wipeX, offsetY + videoHeight);
+          ctx.stroke();
+          ctx.restore();
+        } else if (transType === 'wipe_right') {
+          // 3. Wipe Right: Outgoing clip beneath; incoming clip wipes in from left
+          drawClipVisual(prevClip, prevShot, prevScene, prevElapsed, prevVideoEl);
+          const wipeX = offsetX + videoWidth * transProgress;
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(offsetX, offsetY, wipeX - offsetX, videoHeight);
+          ctx.clip();
+          drawClipVisual(currentClip, currentShot, currentScene, clipElapsed, isRealVideo ? videoRef.current : null);
+          ctx.restore();
+          // Glowing optical wipe edge line
+          ctx.save();
+          ctx.strokeStyle = '#38bdf8';
+          ctx.lineWidth = 2.5;
+          ctx.shadowColor = '#0284c7';
+          ctx.shadowBlur = 8;
+          ctx.beginPath();
+          ctx.moveTo(wipeX, offsetY);
+          ctx.lineTo(wipeX, offsetY + videoHeight);
+          ctx.stroke();
+          ctx.restore();
+        } else if (transType === 'fade_black') {
+          // 4. Fade to Black: Dip to black then fade up
+          if (transProgress < 0.5) {
+            drawClipVisual(prevClip, prevShot, prevScene, prevElapsed, prevVideoEl);
+            const blackAlpha = Math.min(1, Math.max(0, transProgress * 2));
+            ctx.fillStyle = `rgba(0, 0, 0, ${blackAlpha})`;
+            ctx.fillRect(offsetX, offsetY, videoWidth, videoHeight);
+          } else {
+            drawClipVisual(currentClip, currentShot, currentScene, clipElapsed, isRealVideo ? videoRef.current : null);
+            const blackAlpha = Math.min(1, Math.max(0, (1 - transProgress) * 2));
+            ctx.fillStyle = `rgba(0, 0, 0, ${blackAlpha})`;
+            ctx.fillRect(offsetX, offsetY, videoWidth, videoHeight);
+          }
+        } else if (transType === 'whip_pan') {
+          // 5. Whip Pan: High-speed camera swivel with motion blur
+          const ease = transProgress < 0.5 ? 2 * transProgress * transProgress : 1 - Math.pow(-2 * transProgress + 2, 2) / 2;
+          if (transProgress < 0.5) {
+            const shiftX = -ease * videoWidth * 1.35;
+            ctx.save();
+            ctx.translate(shiftX, 0);
+            drawClipVisual(prevClip, prevShot, prevScene, prevElapsed, prevVideoEl);
+            ctx.restore();
+          } else {
+            const shiftX = (1 - ease) * videoWidth * 1.35;
+            ctx.save();
+            ctx.translate(shiftX, 0);
+            drawClipVisual(currentClip, currentShot, currentScene, clipElapsed, isRealVideo ? videoRef.current : null);
+            ctx.restore();
+          }
+          // Horizontal motion streaks
+          ctx.save();
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.35)';
+          ctx.lineWidth = 1.5;
+          for (let s = 0; s < 10; s++) {
+            const streakY = offsetY + (videoHeight * ((s * 37) % 100)) / 100;
+            const streakX = offsetX + ((s * 83 + transProgress * 1600) % videoWidth);
+            const streakLen = 140 + ((s * 29) % 120);
+            ctx.beginPath();
+            ctx.moveTo(streakX, streakY);
+            ctx.lineTo(streakX + streakLen, streakY);
+            ctx.stroke();
+          }
+          ctx.restore();
+        }
+      } else {
+        // Standard Cut or regular playback
+        drawClipVisual(currentClip, currentShot, currentScene, clipElapsed, isRealVideo ? videoRef.current : null);
       }
 
       // Safe Areas & Rule of Thirds Grid
@@ -491,6 +672,17 @@ export const CinemaPlayer = forwardRef<CinemaPlayerRef, CinemaPlayerProps>(({
           crossOrigin="anonymous"
           playsInline
           muted={isMuted}
+          className="hidden"
+        />
+      )}
+
+      {isPrevRealVideo && prevClipForElement?.videoUrl && (
+        <video
+          ref={prevVideoRef}
+          src={prevClipForElement.videoUrl}
+          crossOrigin="anonymous"
+          playsInline
+          muted
           className="hidden"
         />
       )}
@@ -631,6 +823,15 @@ export const CinemaPlayer = forwardRef<CinemaPlayerRef, CinemaPlayerProps>(({
               {formatSMPTETimecode(project.actualAssembledDuration, project.fps)}
             </span>
           </div>
+
+          {/* Active Transition Badge */}
+          {currentClip?.transitionIn && currentClip.transitionIn !== 'cut' && (
+            <div className="hidden sm:flex items-center space-x-1.5 px-2.5 py-1 rounded bg-zinc-950 border border-cyan-800/50 text-[11px] text-cyan-300 font-mono">
+              <Blend className="w-3 h-3 text-cyan-400" />
+              <span>{TRANSITION_PRESETS[currentClip.transitionIn]?.name || currentClip.transitionIn}:</span>
+              <span className="font-bold text-cyan-200">{(currentClip.transitionDuration ?? 0.8).toFixed(1)}s</span>
+            </div>
+          )}
         </div>
 
         {/* Speed & Audio controls */}

@@ -5,6 +5,9 @@ import {
   Shot,
   PROVIDER_SPECS,
   ProviderId,
+  TransitionType,
+  TransitionPreset,
+  TRANSITION_PRESETS,
 } from '../types/film';
 import { formatSMPTETimecode, formatDurationNice } from '../utils/timecode';
 import {
@@ -31,6 +34,14 @@ import {
   ChevronLeft,
   ChevronRight,
   Upload,
+  Blend,
+  ArrowLeft,
+  ArrowRight,
+  Moon,
+  Split,
+  SlidersHorizontal,
+  Wand2,
+  X,
 } from 'lucide-react';
 
 interface TimelineEditorProps {
@@ -44,6 +55,10 @@ interface TimelineEditorProps {
   onReorderClips: (reorderedClips: VideoClip[]) => void;
   onAutoBalanceTimeline: () => void;
   onGenerateClip: (clipId: string) => void;
+  onUpdateProject?: React.Dispatch<React.SetStateAction<FilmProject>>;
+  onOpenCreativeStudio?: (tab?: 'music' | 'animate' | 'concept') => void;
+  onSplitClip?: (clipId: string) => void;
+  onOpenAudioStudio?: () => void;
 }
 
 export const TimelineEditor: React.FC<TimelineEditorProps> = ({
@@ -57,6 +72,10 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
   onReorderClips,
   onAutoBalanceTimeline,
   onGenerateClip,
+  onUpdateProject,
+  onOpenCreativeStudio,
+  onSplitClip,
+  onOpenAudioStudio,
 }) => {
   const timelineContainerRef = useRef<HTMLDivElement | null>(null);
   const [containerWidth, setContainerWidth] = useState<number>(1000);
@@ -65,6 +84,7 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [isSynthesizingDlg, setIsSynthesizingDlg] = useState<boolean>(false);
+  const [appliedAllNotice, setAppliedAllNotice] = useState<string | null>(null);
 
   // Monitor container width for responsive Full View fitting
   useEffect(() => {
@@ -214,8 +234,44 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
     }
   };
 
+  // Handle transition type & duration change
+  const handleUpdateTransition = (type: TransitionType, duration?: number) => {
+    if (!selectedClip) return;
+    const dur = duration !== undefined ? duration : (selectedClip.transitionDuration ?? (TRANSITION_PRESETS[type]?.defaultDuration || 0.8));
+    onUpdateClip({
+      ...selectedClip,
+      transitionIn: type,
+      transitionDuration: dur,
+    });
+  };
 
-  // Synthesize Dialogue Speech Handler
+  // Handle transition duration change
+  const handleUpdateTransitionDuration = (duration: number) => {
+    if (!selectedClip) return;
+    const bounded = Math.max(0.1, Math.min(3.0, Math.round(duration * 100) / 100));
+    onUpdateClip({
+      ...selectedClip,
+      transitionDuration: bounded,
+    });
+  };
+
+  // Apply selected transition settings to all clips in the timeline
+  const handleApplyTransitionToAll = () => {
+    if (!selectedClip) return;
+    const targetType = selectedClip.transitionIn || 'cross_dissolve';
+    const targetDuration = selectedClip.transitionDuration ?? (TRANSITION_PRESETS[targetType]?.defaultDuration || 0.8);
+
+    const updatedClips = project.clips.map((c, idx) => ({
+      ...c,
+      transitionIn: idx === 0 && targetType === 'cross_dissolve' ? 'fade_black' : targetType,
+      transitionDuration: targetDuration,
+    }));
+
+    onReorderClips(updatedClips);
+    setAppliedAllNotice(`Applied ${TRANSITION_PRESETS[targetType]?.name || targetType} (${targetDuration.toFixed(1)}s) to all ${project.clips.length} clips!`);
+    setTimeout(() => setAppliedAllNotice(null), 3500);
+  };
+
   const handleSynthesizeDialogue = async () => {
     if (!selectedShot?.dialogueSnippet) return;
     setIsSynthesizingDlg(true);
@@ -232,11 +288,32 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Speech generation failed');
 
-      // Update dialogue track in project if needed
-      const existingDlg = project.dialogueTracks.find((d) => d.id === `dlg_${selectedShot.shotId}`);
-      if (existingDlg) {
-        existingDlg.audioUrl = data.audioUrl;
-        existingDlg.duration = data.duration;
+      if (onUpdateProject) {
+        onUpdateProject((prev) => {
+          const dlgId = `dlg_${selectedShot.shotId}`;
+          const exists = prev.dialogueTracks.some((d) => d.id === dlgId);
+          const updatedDialogueTracks = exists
+            ? prev.dialogueTracks.map((d) =>
+                d.id === dlgId ? { ...d, audioUrl: data.audioUrl, duration: data.duration } : d
+              )
+            : [
+                ...prev.dialogueTracks,
+                {
+                  id: dlgId,
+                  character: selectedShot.dialogueSnippet!.speaker,
+                  text: selectedShot.dialogueSnippet!.line,
+                  startTime: selectedClip?.timelineStart ?? 0,
+                  duration: data.duration || 3,
+                  volume: 85,
+                  audioUrl: data.audioUrl,
+                },
+              ];
+          return {
+            ...prev,
+            dialogueTracks: updatedDialogueTracks,
+            updatedAt: new Date().toISOString(),
+          };
+        });
       }
     } catch (err) {
       console.error('Dialogue synthesis error:', err);
@@ -510,6 +587,20 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
               </button>
             </div>
 
+            {/* Transition Mode Badge */}
+            <div
+              className="hidden lg:flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-zinc-950 border border-zinc-800 text-xs font-mono text-zinc-300"
+              title="Active clip transition or global transitions supported"
+            >
+              <Blend className="w-3.5 h-3.5 text-cyan-400" />
+              <span className="text-zinc-500">Transition:</span>
+              <span className="text-cyan-300 font-medium">
+                {selectedClip?.transitionIn && selectedClip.transitionIn !== 'cut'
+                  ? `${TRANSITION_PRESETS[selectedClip.transitionIn]?.name || selectedClip.transitionIn} (${(selectedClip.transitionDuration ?? 0.8).toFixed(1)}s)`
+                  : 'Cross-Fade & Wipes Supported'}
+              </span>
+            </div>
+
             {/* Frame View Preset Button */}
             <button
               type="button"
@@ -710,6 +801,38 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
                       />
                     )}
 
+                    {/* Visual Transition In Badge & Gradient Incline */}
+                    {clip.transitionIn && clip.transitionIn !== 'cut' && (
+                      <div
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onSelectClip(clip.clipId);
+                        }}
+                        title={`Incoming Transition: ${TRANSITION_PRESETS[clip.transitionIn]?.name || clip.transitionIn} (${(clip.transitionDuration ?? 0.8).toFixed(1)}s) - Click to edit`}
+                        className="absolute top-0 bottom-0 left-0 z-20 flex items-center px-1 bg-gradient-to-r from-cyan-500/35 via-cyan-500/15 to-transparent border-l-2 border-cyan-400 group/trans hover:from-cyan-500/50 transition cursor-pointer"
+                        style={{
+                          width: `${Math.max(18, Math.min(widthPx * 0.45, (clip.transitionDuration ?? 0.8) * pixelsPerSecond))}px`,
+                        }}
+                      >
+                        <span className="text-[9px] font-mono font-bold text-cyan-200 drop-shadow flex items-center space-x-0.5 pointer-events-none">
+                          {clip.transitionIn === 'cross_dissolve' ? (
+                            <Blend className="w-2.5 h-2.5 text-cyan-300" />
+                          ) : clip.transitionIn === 'wipe_left' ? (
+                            <ArrowLeft className="w-2.5 h-2.5 text-cyan-300" />
+                          ) : clip.transitionIn === 'wipe_right' ? (
+                            <ArrowRight className="w-2.5 h-2.5 text-cyan-300" />
+                          ) : clip.transitionIn === 'fade_black' ? (
+                            <Moon className="w-2.5 h-2.5 text-cyan-300" />
+                          ) : (
+                            <Zap className="w-2.5 h-2.5 text-cyan-300" />
+                          )}
+                          {isFrameViewActive && (
+                            <span className="text-[8px] opacity-90 ml-0.5">{(clip.transitionDuration ?? 0.8).toFixed(1)}s</span>
+                          )}
+                        </span>
+                      </div>
+                    )}
+
                     {/* Header info */}
                     <div className="flex items-center justify-between gap-1 z-10">
                       <div className="flex items-center space-x-1 truncate">
@@ -754,10 +877,17 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
                         />
                         <span className="capitalize">{clip.generationStatus}</span>
                       </span>
-                      {clip.totalClipsInShot > 1 && (
-                        <span className="text-purple-300 font-mono">
-                          part {clip.clipIndexInShot}/{clip.totalClipsInShot}
+                      {clip.transitionIn && clip.transitionIn !== 'cut' ? (
+                        <span className="text-[8px] font-mono text-cyan-300 bg-cyan-950/80 border border-cyan-800/40 px-1 rounded flex items-center space-x-0.5">
+                          <Blend className="w-2 h-2 text-cyan-400" />
+                          <span>{clip.transitionIn === 'cross_dissolve' ? 'X-Fade' : clip.transitionIn.replace('_', ' ')}: {(clip.transitionDuration ?? 0.8).toFixed(1)}s</span>
                         </span>
+                      ) : (
+                        clip.totalClipsInShot > 1 && (
+                          <span className="text-purple-300 font-mono">
+                            part {clip.clipIndexInShot}/{clip.totalClipsInShot}
+                          </span>
+                        )
                       )}
                     </div>
 
@@ -838,7 +968,21 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
                 <Music className="w-3.5 h-3.5 text-purple-400" />
                 <span>Music Score (A3)</span>
               </span>
-              <span className="text-[10px] text-zinc-500 font-mono">Stereo</span>
+              {onOpenCreativeStudio ? (
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onOpenCreativeStudio('music');
+                  }}
+                  className="px-1.5 py-0.5 rounded bg-purple-500/15 hover:bg-purple-500/30 border border-purple-500/30 text-[9px] font-mono text-purple-300 transition"
+                  title="Compose film score with Lyria 3"
+                >
+                  + Lyria
+                </button>
+              ) : (
+                <span className="text-[10px] text-zinc-500 font-mono">Stereo</span>
+              )}
             </div>
             <div className="relative flex-1 h-full">
               {project.musicTracks.map((mus) => {
@@ -852,10 +996,28 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
                       left: `${leftPx}px`,
                       width: `${widthPx}px`,
                     }}
-                    className="absolute top-1 bottom-1 rounded bg-purple-950/50 border border-purple-500/40 px-2 flex items-center justify-between text-[10px] text-purple-200"
+                    className="group/mus absolute top-1 bottom-1 rounded bg-purple-950/50 border border-purple-500/40 px-2 flex items-center justify-between text-[10px] text-purple-200"
                   >
                     <span className="font-semibold truncate">{mus.title}</span>
-                    <span className="font-mono text-[9px] text-purple-400 ml-2">{mus.bpm} BPM</span>
+                    <div className="flex items-center shrink-0">
+                      <span className="font-mono text-[9px] text-purple-400 ml-2">{mus.bpm} BPM</span>
+                      {onUpdateProject && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onUpdateProject((prev) => ({
+                              ...prev,
+                              musicTracks: prev.musicTracks.filter((t) => t.id !== mus.id),
+                            }));
+                          }}
+                          className="ml-1.5 opacity-0 group-hover/mus:opacity-100 p-0.5 rounded hover:bg-rose-500/30 text-purple-300 hover:text-rose-300 transition"
+                          title={`Remove "${mus.title}" from Track A3`}
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
                   </div>
                 );
               })}
@@ -885,6 +1047,16 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
               </div>
 
               <div className="flex items-center space-x-2">
+                {onSplitClip && selectedClip.duration >= (PROVIDER_SPECS[selectedClip.provider]?.minClipDuration || 2) * 2 && (
+                  <button
+                    onClick={() => onSplitClip(selectedClip.clipId)}
+                    className="flex items-center space-x-1.5 px-2.5 py-1 rounded bg-indigo-950/70 hover:bg-indigo-900 text-xs text-indigo-200 border border-indigo-500/40 transition"
+                    title="Split selected clip cleanly into two sequential clips"
+                  >
+                    <Split className="w-3.5 h-3.5" />
+                    <span>Split Clip</span>
+                  </button>
+                )}
                 <button
                   onClick={() => onGenerateClip(selectedClip.clipId)}
                   className="flex items-center space-x-1.5 px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-xs text-zinc-200 border border-zinc-700 transition"
@@ -936,6 +1108,140 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
                   {selectedClip.visualContinuity.timeOfDay}
                 </span>
               </div>
+            </div>
+
+            {/* VIDEO TRANSITION & CUT TIMING CONTROLS */}
+            <div className="bg-zinc-950/90 p-3.5 rounded-lg border border-zinc-800 space-y-3 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-zinc-200 flex items-center space-x-1.5">
+                  <Blend className="w-4 h-4 text-cyan-400" />
+                  <span>Incoming Video Transition</span>
+                </span>
+                {appliedAllNotice ? (
+                  <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                    ✓ {appliedAllNotice}
+                  </span>
+                ) : (
+                  <span className="text-[11px] font-mono text-zinc-400">
+                    {TRANSITION_PRESETS[selectedClip.transitionIn || 'cut']?.name || 'Standard Cut'}
+                  </span>
+                )}
+              </div>
+
+              {/* Transition Preset Selector Buttons */}
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                {(Object.keys(TRANSITION_PRESETS) as TransitionType[]).map((tKey) => {
+                  const preset = TRANSITION_PRESETS[tKey];
+                  const isActive = (selectedClip.transitionIn || 'cut') === tKey;
+                  return (
+                    <button
+                      key={tKey}
+                      type="button"
+                      onClick={() => handleUpdateTransition(tKey)}
+                      className={`flex flex-col items-start p-2 rounded-lg border text-left transition ${
+                        isActive
+                          ? 'bg-cyan-950/80 border-cyan-500 text-cyan-200 ring-1 ring-cyan-500/40 shadow-sm'
+                          : 'bg-zinc-900/80 hover:bg-zinc-850 border-zinc-800 text-zinc-300 hover:border-zinc-700'
+                      }`}
+                    >
+                      <div className="flex items-center space-x-1.5 mb-0.5">
+                        {tKey === 'cut' ? (
+                          <Scissors className="w-3.5 h-3.5 text-zinc-400" />
+                        ) : tKey === 'cross_dissolve' ? (
+                          <Blend className="w-3.5 h-3.5 text-cyan-400" />
+                        ) : tKey === 'fade_black' ? (
+                          <Moon className="w-3.5 h-3.5 text-amber-400" />
+                        ) : tKey === 'wipe_left' ? (
+                          <ArrowLeft className="w-3.5 h-3.5 text-indigo-400" />
+                        ) : tKey === 'wipe_right' ? (
+                          <ArrowRight className="w-3.5 h-3.5 text-indigo-400" />
+                        ) : (
+                          <Zap className="w-3.5 h-3.5 text-yellow-400" />
+                        )}
+                        <span className="font-semibold text-xs">{preset.name}</span>
+                      </div>
+                      <span className="text-[10px] text-zinc-500 line-clamp-1 leading-tight">
+                        {preset.tagline}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Transition Duration Settings (if transition is not standard cut) */}
+              {(selectedClip.transitionIn || 'cut') !== 'cut' && (
+                <div className="pt-2 border-t border-zinc-850 space-y-2.5">
+                  <div className="flex items-center justify-between text-zinc-300 text-xs">
+                    <span className="flex items-center space-x-1.5">
+                      <Clock className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>Transition Duration:</span>
+                    </span>
+                    <div className="flex items-center space-x-2 font-mono">
+                      <span className="text-cyan-400 font-bold">
+                        {(selectedClip.transitionDuration ?? 0.8).toFixed(2)}s
+                      </span>
+                      <span className="text-zinc-500 text-[11px]">
+                        ({Math.round((selectedClip.transitionDuration ?? 0.8) * project.fps)} frames @ {project.fps}fps)
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Duration Slider */}
+                  <div className="flex items-center space-x-3">
+                    <input
+                      type="range"
+                      min={0.1}
+                      max={Math.min(3.0, selectedClip.duration)}
+                      step={0.05}
+                      value={selectedClip.transitionDuration ?? 0.8}
+                      onChange={(e) => handleUpdateTransitionDuration(parseFloat(e.target.value))}
+                      className="flex-1 accent-cyan-400 h-1.5 bg-zinc-800 rounded-lg cursor-pointer"
+                    />
+                    <input
+                      type="number"
+                      min={0.1}
+                      max={Math.min(3.0, selectedClip.duration)}
+                      step={0.1}
+                      value={selectedClip.transitionDuration ?? 0.8}
+                      onChange={(e) => handleUpdateTransitionDuration(parseFloat(e.target.value) || 0.1)}
+                      className="w-16 px-2 py-0.5 rounded bg-zinc-900 border border-zinc-700 text-cyan-300 font-mono text-center text-xs"
+                    />
+                  </div>
+
+                  {/* Preset Duration Pills */}
+                  <div className="flex flex-wrap items-center justify-between gap-1 text-[11px]">
+                    <div className="flex items-center space-x-1">
+                      <span className="text-zinc-500 text-[10px] mr-1">Presets:</span>
+                      {[0.3, 0.5, 0.8, 1.0, 1.5, 2.0].map((dur) => (
+                        <button
+                          key={dur}
+                          type="button"
+                          onClick={() => handleUpdateTransitionDuration(dur)}
+                          disabled={dur > selectedClip.duration}
+                          className={`px-2 py-0.5 rounded font-mono transition ${
+                            Math.abs((selectedClip.transitionDuration ?? 0.8) - dur) < 0.05
+                              ? 'bg-cyan-500/20 text-cyan-300 border border-cyan-500/40'
+                              : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-400 border border-zinc-800'
+                          } disabled:opacity-30`}
+                        >
+                          {dur}s
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Apply To All Button */}
+                    <button
+                      type="button"
+                      onClick={handleApplyTransitionToAll}
+                      className="flex items-center space-x-1 px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 text-[11px] font-medium transition"
+                      title="Apply this transition type and duration across all clips in the timeline"
+                    >
+                      <Split className="w-3 h-3 text-cyan-400" />
+                      <span>Apply to All Clips</span>
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Provider Generation Error Notice if failed */}
@@ -1000,6 +1306,18 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
                   <span>{selectedClip.generationStatus === 'generating' ? 'Generating Video...' : 'Generate AI Video Clip'}</span>
                 </button>
 
+                {onOpenCreativeStudio && (
+                  <button
+                    type="button"
+                    onClick={() => onOpenCreativeStudio('animate')}
+                    className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-indigo-950/60 hover:bg-indigo-900/80 border border-indigo-700/60 text-indigo-200 text-xs font-medium transition"
+                    title="Animate a photo or storyboard frame with Gemini Omni Flash"
+                  >
+                    <Wand2 className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>Animate Photo (Omni)</span>
+                  </button>
+                )}
+
                 {selectedShot.dialogueSnippet && (
                   <button
                     type="button"
@@ -1010,6 +1328,17 @@ export const TimelineEditor: React.FC<TimelineEditorProps> = ({
                   >
                     <Mic className="w-3.5 h-3.5 text-purple-400" />
                     <span>{isSynthesizingDlg ? 'Synthesizing Audio...' : 'Synthesize Spoken Voice'}</span>
+                  </button>
+                )}
+
+                {onOpenAudioStudio && (
+                  <button
+                    type="button"
+                    onClick={onOpenAudioStudio}
+                    className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs font-medium transition"
+                  >
+                    <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Audio & Voice Studio</span>
                   </button>
                 )}
               </div>

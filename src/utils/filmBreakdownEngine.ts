@@ -11,6 +11,11 @@ import {
   DialogueTrackItem,
   AudioSFXItem,
   MusicTrackItem,
+  CharacterProfile,
+  LocationProfile,
+  StoryboardFrame,
+  StudioLanguage,
+  VisualStylePreset,
 } from '../types/film';
 import { formatSMPTETimecode } from './timecode';
 
@@ -23,13 +28,22 @@ import { formatSMPTETimecode } from './timecode';
 export interface BreakdownParams {
   projectId?: string;
   title: string;
+  description?: string;
   genre: string;
   logline: string;
   targetDurationSeconds: number;
   provider: ProviderId;
   screenplay: string;
+  screenplayLanguage?: StudioLanguage;
+  outputLanguage?: StudioLanguage;
+  visualStyle?: VisualStylePreset;
+  targetAudience?: string;
+  aspectRatio?: '16:9' | '2.39:1' | '9:16' | '1:1' | '4:3';
+  resolution?: '720p' | '1080p' | '4K Cinema';
   characters?: { name: string; visualNotes: string; costume: string }[];
   locations?: { name: string; lighting: string; colorKey: string }[];
+  characterProfiles?: CharacterProfile[];
+  locationProfiles?: LocationProfile[];
   aiBreakdown?: any; // Structured output from Gemini breakdown API
 }
 
@@ -388,7 +402,7 @@ export function generateFilmBreakdown(params: BreakdownParams): FilmProject {
             model: `${providerSpec.name} v2.4`,
             generationStatus: 'queued',
             progress: 0,
-            videoUrl: generateProceduralVideoPlaceholder(clipId, shotObj.shotType, shotConfig.cam, clipDur, sceneData.mood),
+            videoUrl: '',
             storageReference: '',
             timestamp: new Date().toISOString(),
             timecode: formatSMPTETimecode(accumulatedTime),
@@ -434,11 +448,22 @@ export function generateFilmBreakdown(params: BreakdownParams): FilmProject {
   return assembleFinalProject({
     projectId,
     title,
+    description: params.description,
     genre,
     logline,
     target,
     provider,
     screenplay,
+    screenplayLanguage: params.screenplayLanguage,
+    outputLanguage: params.outputLanguage,
+    visualStyle: params.visualStyle,
+    targetAudience: params.targetAudience,
+    aspectRatio: params.aspectRatio,
+    resolution: params.resolution,
+    characters,
+    locations,
+    characterProfiles: params.characterProfiles,
+    locationProfiles: params.locationProfiles,
     acts,
     scenes,
     allShots,
@@ -565,7 +590,7 @@ function buildProjectFromAIBreakdown(
           model: `${providerSpec.name} v2.4`,
           generationStatus: 'queued',
           progress: 0,
-          videoUrl: generateProceduralVideoPlaceholder(clipId, shotObj.shotType, shotObj.cameraMovement, clipDur, sc.mood || 'Dramatic'),
+          videoUrl: '',
           storageReference: '',
           timestamp: new Date().toISOString(),
           timecode: formatSMPTETimecode(accumulatedTime),
@@ -608,11 +633,22 @@ function buildProjectFromAIBreakdown(
   return assembleFinalProject({
     projectId,
     title: aiData.title || title,
+    description: params.description,
     genre: aiData.genre || genre,
     logline: aiData.logline || logline,
     target,
     provider,
     screenplay,
+    screenplayLanguage: params.screenplayLanguage,
+    outputLanguage: params.outputLanguage,
+    visualStyle: params.visualStyle,
+    targetAudience: params.targetAudience,
+    aspectRatio: params.aspectRatio,
+    resolution: params.resolution,
+    characters: params.characters,
+    locations: params.locations,
+    characterProfiles: params.characterProfiles,
+    locationProfiles: params.locationProfiles,
     acts,
     scenes,
     allShots,
@@ -625,11 +661,22 @@ function buildProjectFromAIBreakdown(
 function assembleFinalProject(config: {
   projectId: string;
   title: string;
+  description?: string;
   genre: string;
   logline: string;
   target: number;
   provider: ProviderId;
   screenplay: string;
+  screenplayLanguage?: StudioLanguage;
+  outputLanguage?: StudioLanguage;
+  visualStyle?: VisualStylePreset;
+  targetAudience?: string;
+  aspectRatio?: '16:9' | '2.39:1' | '9:16' | '1:1' | '4:3';
+  resolution?: '720p' | '1080p' | '4K Cinema';
+  characters?: { name: string; visualNotes: string; costume: string }[];
+  locations?: { name: string; lighting: string; colorKey: string }[];
+  characterProfiles?: CharacterProfile[];
+  locationProfiles?: LocationProfile[];
   acts: Act[];
   scenes: Scene[];
   allShots: Shot[];
@@ -741,16 +788,78 @@ function assembleFinalProject(config: {
   // Analyze initial continuity
   const continuityIssues = runContinuityAudit(allClips, allShots);
 
+  // Build Character & Location Profiles for Consistency Workspace
+  const resolvedChars =
+    config.characters && config.characters.length > 0
+      ? config.characters
+      : deriveCharactersFromScript(screenplay);
+  const resolvedLocs =
+    config.locations && config.locations.length > 0
+      ? config.locations
+      : deriveLocationsFromScript(screenplay);
+
+  const characterProfiles: CharacterProfile[] =
+    config.characterProfiles && config.characterProfiles.length > 0
+      ? config.characterProfiles
+      : resolvedChars.map((c, idx) => ({
+          id: `char_${idx + 1}`,
+          name: c.name,
+          role: idx === 0 ? 'Lead Protagonist' : 'Supporting Role',
+          appearance: c.visualNotes,
+          costume: c.costume,
+          visualNotes: c.visualNotes,
+          consistencyPrompt: `${c.name}: ${c.visualNotes}. Wardrobe: ${c.costume}`,
+        }));
+
+  const locationProfiles: LocationProfile[] =
+    config.locationProfiles && config.locationProfiles.length > 0
+      ? config.locationProfiles
+      : resolvedLocs.map((l, idx) => ({
+          id: `loc_${idx + 1}`,
+          name: l.name,
+          environmentType: 'Cinema Set',
+          lighting: l.lighting,
+          colorKey: l.colorKey,
+          atmosphere: `${config.visualStyle || 'Cinematic Realism'} atmospheric set`,
+        }));
+
+  const storyboardFrames: StoryboardFrame[] = allShots.map((shot, idx) => ({
+    frameId: `sb_${shot.shotId}`,
+    shotId: shot.shotId,
+    sceneId: shot.sceneId,
+    frameNumber: idx + 1,
+    title: shot.title,
+    description: shot.description,
+    shotType: shot.shotType,
+    cameraAngle: shot.angle,
+    cameraMovement: shot.cameraMovement,
+    composition: `${shot.shotType}, ${shot.angle}, ${shot.visualContinuity.screenDirection}`,
+    lightingNotes: shot.visualContinuity.lightingKey,
+    approvalStatus: 'pending',
+  }));
+
+  const chosenAspect = config.aspectRatio || '16:9';
+  const chosenRes = config.resolution || '1080p';
+  const chosenOutLang = config.outputLanguage || config.screenplayLanguage || 'en';
+
   return {
     id: projectId,
     title: title || 'Untitled AI Masterpiece',
+    description: config.description || logline,
     genre: genre || 'Cinematic Drama',
     logline: logline || 'An epic narrative assembled through algorithmic pacing and generative visual harmony.',
     targetDurationSeconds: target,
     actualAssembledDuration: finalAssembledDuration,
     fps: 24,
-    aspectRatio: '2.39:1',
-    resolution: '1080p',
+    aspectRatio: chosenAspect,
+    resolution: chosenRes,
+    screenplayLanguage: config.screenplayLanguage || 'en',
+    outputLanguage: chosenOutLang,
+    visualStyle: config.visualStyle || 'Cinematic Realism',
+    targetAudience: config.targetAudience || 'General Cinema Audience',
+    status: 'in_production',
+    breakdownApproved: false,
+    storyboardApproved: false,
     screenplayRaw: screenplay,
     acts,
     scenes,
@@ -761,12 +870,18 @@ function assembleFinalProject(config: {
     musicTracks,
     continuityIssues,
     defaultProvider: provider,
+    characters: resolvedChars,
+    locations: resolvedLocs,
+    characterProfiles,
+    locationProfiles,
+    storyboardFrames,
     exportSettings: {
-      resolution: '1080p',
-      aspectRatio: '2.39:1',
+      resolution: chosenRes,
+      aspectRatio: chosenAspect,
       fps: 24,
       codec: 'H.264',
       burnSubtitles: true,
+      subtitleLanguage: chosenOutLang,
       colorGradeLUT: 'Cinematic Teal & Orange',
       audioMix: {
         dialogueLevel: 90,

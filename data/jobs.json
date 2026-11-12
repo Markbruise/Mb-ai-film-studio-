@@ -352,5 +352,39 @@
     "prompt": "Cinematic shot of a detective entering an abandoned warehouse at dusk, 16:9",
     "duration": 5,
     "aspectRatio": "16:9"
+  },
+  {
+    "jobId": "render_1794513530568",
+    "filmProjectId": "proj_test_verify",
+    "type": "render_export",
+    "targetId": "verify_upgrade_render_master_1794513530568.mp4",
+    "title": "Render MP4: Verify Upgrade Render",
+    "status": "completed",
+    "progress": 100,
+    "createdAt": 1794513530568,
+    "retryCount": 0,
+    "completedAt": 1794513541760,
+    "videoUrl": "/exports/verify_upgrade_render_master_1794513530568.mp4",
+    "downloadUrl": "/api/exports/verify_upgrade_render_master_1794513530568.mp4",
+    "fileSize": 151853,
+    "duration": 3,
+    "resolution": "1280x720"
+  },
+  {
+    "jobId": "render_1794513574063",
+    "filmProjectId": "proj_test_verify",
+    "type": "render_export",
+    "targetId": "verify_upgrade_render_master_1794513574063.mp4",
+    "title": "Render MP4: Verify Upgrade Render",
+    "status": "completed",
+    "progress": 100,
+    "createdAt": 1794513574063,
+    "retryCount": 0,
+    "completedAt": 1794513588298,
+    "videoUrl": "/exports/verify_upgrade_render_master_1794513574063.mp4",
+    "downloadUrl": "/api/exports/verify_upgrade_render_master_1794513574063.mp4",
+    "fileSize": 247721,
+    "duration": 5.2,
+    "resolution": "1280x720"
   }
 ]

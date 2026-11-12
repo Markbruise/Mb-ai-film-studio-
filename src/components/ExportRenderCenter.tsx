@@ -1,5 +1,6 @@
-import React, { useState, useRef } from 'react';
-import { FilmProject, RenderExportSettings } from '../types/film';
+import React, { useState, useRef, useEffect } from 'react';
+import { FilmProject, RenderExportSettings, ExportRecord, StudioLanguage, evaluateTimelineAccess } from '../types/film';
+import { SUPPORTED_LANGUAGES } from '../utils/i18n';
 import { formatDurationNice, formatSMPTETimecode } from '../utils/timecode';
 import {
   Download,
@@ -21,12 +22,14 @@ import {
   Clock,
   HardDrive,
   ShieldCheck,
+  Languages,
 } from 'lucide-react';
 
 interface ExportRenderCenterProps {
   project: FilmProject;
   onUpdateExportSettings: (settings: RenderExportSettings) => void;
   onNavigateToPreview: () => void;
+  onNavigateToProduction?: () => void;
 }
 
 interface MP4ValidationInfo {
@@ -48,6 +51,7 @@ export const ExportRenderCenter: React.FC<ExportRenderCenterProps> = ({
   project,
   onUpdateExportSettings,
   onNavigateToPreview,
+  onNavigateToProduction,
 }) => {
   const [settings, setSettings] = useState<RenderExportSettings>(project.exportSettings);
   const [isExporting, setIsExporting] = useState<boolean>(false);
@@ -57,7 +61,28 @@ export const ExportRenderCenter: React.FC<ExportRenderCenterProps> = ({
   const [validationResult, setValidationResult] = useState<MP4ValidationInfo | null>(null);
   const [isDownloading, setIsDownloading] = useState<boolean>(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [exportHistory, setExportHistory] = useState<ExportRecord[]>([]);
+  const [activeHistoryVideoUrl, setActiveHistoryVideoUrl] = useState<string | null>(null);
   const videoPreviewRef = useRef<HTMLVideoElement | null>(null);
+
+  const timelineAccess = evaluateTimelineAccess(project);
+
+  const loadExportHistory = async () => {
+    try {
+      const res = await fetch('/api/exports');
+      if (res.ok) {
+        const data = await res.json();
+        const list = Array.isArray(data) ? data : data?.exports;
+        if (Array.isArray(list)) {
+          setExportHistory(list);
+        }
+      }
+    } catch {}
+  };
+
+  useEffect(() => {
+    loadExportHistory();
+  }, []);
 
   const handleExport = async () => {
     setIsExporting(true);
@@ -161,6 +186,7 @@ export const ExportRenderCenter: React.FC<ExportRenderCenterProps> = ({
               fcpxml,
               srt,
             });
+            loadExportHistory();
             setIsExporting(false);
           } else if (currentJob.status === 'failed') {
             clearInterval(pollInterval);
@@ -277,8 +303,9 @@ export const ExportRenderCenter: React.FC<ExportRenderCenterProps> = ({
 
         <button
           onClick={handleExport}
-          disabled={isExporting}
-          className="flex items-center space-x-2 px-6 py-3 rounded-xl bg-gradient-to-r from-cyan-600 via-indigo-600 to-purple-600 hover:from-cyan-500 hover:to-purple-500 text-white font-semibold text-sm shadow-xl shadow-indigo-950/40 transition active:scale-95 disabled:opacity-50 shrink-0"
+          disabled={isExporting || !timelineAccess.unlocked}
+          title={!timelineAccess.unlocked ? 'Complete all clip video generations or uploads first' : 'Render master MP4'}
+          className="flex items-center space-x-2 px-6 py-3 rounded-xl bg-gradient-to-r from-cyan-600 via-indigo-600 to-purple-600 hover:from-cyan-500 hover:to-purple-500 text-white font-semibold text-sm shadow-xl shadow-indigo-950/40 transition active:scale-95 disabled:opacity-45 shrink-0"
         >
           {isExporting ? (
             <>
@@ -293,6 +320,31 @@ export const ExportRenderCenter: React.FC<ExportRenderCenterProps> = ({
           )}
         </button>
       </div>
+
+      {/* Clip Readiness Gate */}
+      {!timelineAccess.unlocked && (
+        <div className="p-4 rounded-xl bg-amber-950/30 border border-amber-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="flex items-start space-x-3">
+            <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+            <div>
+              <div className="text-sm font-bold text-amber-200">
+                Film Clips Incomplete ({timelineAccess.readyClips}/{timelineAccess.totalClips} Verified)
+              </div>
+              <p className="text-xs text-amber-200/80 mt-0.5">
+                {timelineAccess.blockedClips.length} shot(s) still require generated AI video or uploaded MP4 footage before master export can run cleanly.
+              </p>
+            </div>
+          </div>
+          {onNavigateToProduction && (
+            <button
+              onClick={onNavigateToProduction}
+              className="px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-zinc-950 font-bold text-xs shrink-0 transition"
+            >
+              Open AI Production Center
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Export Progress Bar if exporting or completed */}
       {(isExporting || (exportResult && exportResult.status !== 'error')) && (
@@ -399,7 +451,7 @@ export const ExportRenderCenter: React.FC<ExportRenderCenterProps> = ({
             </select>
           </div>
 
-          <div className="pt-2">
+          <div className="pt-2 space-y-3">
             <label className="flex items-center space-x-2 text-xs text-zinc-300 cursor-pointer">
               <input
                 type="checkbox"
@@ -413,9 +465,28 @@ export const ExportRenderCenter: React.FC<ExportRenderCenterProps> = ({
               />
               <span>Burn-In Dialogue Subtitles (SRT/VTT)</span>
             </label>
-            <p className="text-[11px] text-zinc-500 mt-1 pl-6">
-              Renders yellow typography in lower third with anti-aliased backdrop pill.
-            </p>
+
+            <div>
+              <label className="text-[11px] text-zinc-400 flex items-center space-x-1.5 mb-1">
+                <Languages className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Subtitle & Delivery Language</span>
+              </label>
+              <select
+                value={settings.subtitleLanguage || project.outputLanguage || 'en'}
+                onChange={(e) => {
+                  const updated = { ...settings, subtitleLanguage: e.target.value as StudioLanguage };
+                  setSettings(updated);
+                  onUpdateExportSettings(updated);
+                }}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-lg p-2 text-xs text-white"
+              >
+                {SUPPORTED_LANGUAGES.map((lang) => (
+                  <option key={lang.code} value={lang.code}>
+                    {lang.label} ({lang.nativeLabel})
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
         </div>
 
@@ -733,6 +804,80 @@ export const ExportRenderCenter: React.FC<ExportRenderCenterProps> = ({
           </div>
         </div>
       )}
+
+      {/* Server Export Archive History */}
+      <div className="pt-4 border-t border-zinc-800 space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center space-x-2 text-sm font-bold text-white">
+            <HardDrive className="w-4 h-4 text-cyan-400" />
+            <span>Rendered Export History ({exportHistory.length})</span>
+          </div>
+          <button
+            onClick={loadExportHistory}
+            className="text-xs text-cyan-400 hover:underline font-mono"
+          >
+            Refresh Archive
+          </button>
+        </div>
+
+        {exportHistory.length === 0 ? (
+          <div className="p-4 rounded-xl bg-zinc-900/40 border border-zinc-800 text-xs text-zinc-500 text-center">
+            No mastered MP4 exports recorded yet on disk.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {exportHistory.map((item) => (
+              <div
+                key={item.id}
+                className="p-3.5 rounded-xl bg-zinc-900/60 border border-zinc-800 space-y-3"
+              >
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                  <div>
+                    <div className="font-bold text-white flex items-center space-x-2">
+                      <FileVideo className="w-4 h-4 text-emerald-400" />
+                      <span>{item.filename}</span>
+                    </div>
+                    <div className="text-[11px] text-zinc-400 font-mono mt-0.5">
+                      {(item.fileSize / (1024 * 1024)).toFixed(2)} MB • Rendered {new Date(item.createdAt).toLocaleString()}
+                    </div>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setActiveHistoryVideoUrl(
+                          activeHistoryVideoUrl === item.videoUrl ? null : item.videoUrl
+                        )
+                      }
+                      className="flex items-center space-x-1 px-3 py-1.5 rounded-lg bg-zinc-950 hover:bg-zinc-800 border border-zinc-700 text-zinc-200 transition"
+                    >
+                      <Play className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>{activeHistoryVideoUrl === item.videoUrl ? 'Close' : 'Watch'}</span>
+                    </button>
+                    <a
+                      href={item.downloadUrl}
+                      download={item.filename}
+                      className="flex items-center space-x-1 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold transition"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Download MP4</span>
+                    </a>
+                  </div>
+                </div>
+
+                {activeHistoryVideoUrl === item.videoUrl && (
+                  <video
+                    src={item.videoUrl}
+                    controls
+                    playsInline
+                    className="w-full max-h-80 rounded-lg bg-black border border-zinc-800"
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 };
